@@ -71,8 +71,8 @@ class RAGEngine
 
         // Step 5: Generate answer using LLM
         try {
-            // Start chat with system prompt
-            $this->llm->addMessage($this->system_prompt, Role::System);
+            // Set system instruction
+            $this->llm->setSystemInstruction($this->system_prompt);
 
             // Add conversation history
             foreach ($conversation_history as $msg) {
@@ -81,7 +81,6 @@ class RAGEngine
                     $role = match($msg['role']) {
                         'user' => Role::User,
                         'assistant', 'model' => Role::Model,
-                        'system' => Role::System,
                         default => Role::User,
                     };
                     $this->llm->addMessage($msg['content'], $role);
