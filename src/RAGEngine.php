@@ -56,20 +56,14 @@ class RAGEngine
             true
         );
 
-        // Step 3: Check if we have relevant results
+        // Step 3: Build context from search results (or note if no results)
         if (empty($search_results)) {
-            return [
-                'success' => true,
-                'answer' => "I couldn't find relevant information in the knowledge base to answer your question.",
-                'sources' => [],
-                'no_results' => true,
-            ];
+            $context = "No specific context found in the knowledge base for this query.";
+        } else {
+            $context = $this->buildContext($search_results);
         }
 
-        // Step 4: Build context from search results
-        $context = $this->buildContext($search_results);
-
-        // Step 5: Generate answer using LLM
+        // Step 4: Generate answer using LLM (always, even if no context found)
         try {
             // Set system instruction
             $this->llm->setSystemInstruction($this->system_prompt);
@@ -87,7 +81,7 @@ class RAGEngine
                 }
             }
 
-            // Add current question with context
+            // Add current question with context (may be empty if no search results)
             $prompt = "Context from knowledge base:\n\n{$context}\n\n---\n\nUser question: {$question}";
             $response = $this->llm->sendMessage($prompt);
 
