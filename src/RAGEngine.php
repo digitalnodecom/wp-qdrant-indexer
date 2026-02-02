@@ -3,6 +3,7 @@
 namespace DigitalNode\WPQdrantIndexer;
 
 use AIAccess\Chat\Chat;
+use AIAccess\Chat\Role;
 
 /**
  * RAG (Retrieval-Augmented Generation) Engine
@@ -71,12 +72,19 @@ class RAGEngine
         // Step 5: Generate answer using LLM
         try {
             // Start chat with system prompt
-            $this->llm->addMessage('system', $this->system_prompt);
+            $this->llm->addMessage($this->system_prompt, Role::System);
 
             // Add conversation history
             foreach ($conversation_history as $msg) {
                 if (isset($msg['role']) && isset($msg['content'])) {
-                    $this->llm->addMessage($msg['role'], $msg['content']);
+                    // Convert string role to Role enum
+                    $role = match($msg['role']) {
+                        'user' => Role::User,
+                        'assistant', 'model' => Role::Model,
+                        'system' => Role::System,
+                        default => Role::User,
+                    };
+                    $this->llm->addMessage($msg['content'], $role);
                 }
             }
 
