@@ -1,5 +1,5 @@
 {
-    "name": "digitalnode/wp-qdrant-indexer",
+    "name": "digitalnodecom/wp-qdrant-indexer",
     "description": "A flexible WordPress content indexer for Qdrant vector database with OpenAI embeddings, intelligent caching, and RAG capabilities using multiple LLM providers",
     "type": "library",
     "keywords": ["wordpress", "qdrant", "vector-database", "embeddings", "openai", "rag", "search", "indexer", "llm", "ai", "chatbot"],
