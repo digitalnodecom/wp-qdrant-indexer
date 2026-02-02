@@ -1,0 +1,29 @@
+{
+    "name": "digitalnode/wp-qdrant-indexer",
+    "description": "A flexible WordPress content indexer for Qdrant vector database with OpenAI embeddings, intelligent caching, and RAG capabilities using multiple LLM providers",
+    "type": "library",
+    "keywords": ["wordpress", "qdrant", "vector-database", "embeddings", "openai", "rag", "search", "indexer", "llm", "ai", "chatbot"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Nikola Anastasovski",
+            "email": "nikola@digitalnode.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "ai-access/ai-access": "^0.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "DigitalNode\\WPQdrantIndexer\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "DigitalNode\\WPQdrantIndexer\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
