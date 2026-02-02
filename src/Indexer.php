@@ -54,7 +54,7 @@ class Indexer
 
         // Step 4: Embed and upload
         echo "Generating embeddings and uploading to Qdrant...\n";
-        $this->embedAndUpload($chunks);
+        $this->embedAndUpload($chunks, $recreate_collection);
 
         $elapsed = round(microtime(true) - $start_time, 2);
         $stats = $this->embedder->getCacheStats();
@@ -164,11 +164,12 @@ class Indexer
     /**
      * Generate embeddings and upload to Qdrant
      */
-    private function embedAndUpload(array $chunks): void
+    private function embedAndUpload(array $chunks, bool $skip_qdrant_cache = true): void
     {
         $total = count($chunks);
         $points = [];
         $start_time = time();
+        $qdrant_cache_hits = 0;
 
         foreach ($chunks as $index => $chunk) {
             // Progress indicator
@@ -180,29 +181,51 @@ class Indexer
             $stats = $this->embedder->getCacheStats();
 
             echo sprintf(
-                "\rProcessing %d/%d (cached: %d, new: %d) ETA: %s    ",
+                "\rProcessing %d/%d (local: %d, qdrant: %d, new: %d) ETA: %s    ",
                 $index + 1,
                 $total,
                 $stats['cached'],
+                $qdrant_cache_hits,
                 $stats['new'],
                 $eta
             );
 
-            // Generate embedding
-            $cache_key = $chunk['post_id'] . '_' . $chunk['id'];
-            $embedding = $this->embedder->getEmbedding($chunk['text'], $cache_key);
+            // Step 1: Check Qdrant for existing embedding with same content hash
+            // (Skip if recreating collection since it's empty anyway)
+            $content_hash = md5($chunk['text']);
+            $existing_point = !$skip_qdrant_cache ? $this->qdrant->searchByContentHash($content_hash) : null;
 
-            if (!$embedding) {
-                echo "\nFailed to embed chunk {$chunk['id']}, skipping...\n";
-                continue;
+            if ($existing_point) {
+                // Reuse existing vector from Qdrant
+                $vector = $existing_point['vector'];
+                $qdrant_cache_hits++;
+            } else {
+                // Step 2: Check local WordPress cache or generate new embedding
+                $cache_key = $chunk['post_id'] . '_' . $chunk['id'];
+                $embedding = $this->embedder->getEmbedding($chunk['text'], $cache_key);
+
+                if (!$embedding) {
+                    echo "\nFailed to embed chunk {$chunk['id']}, skipping...\n";
+                    continue;
+                }
+
+                $vector = $embedding['vector'];
+
+                // Rate limiting for new embeddings
+                if (!$embedding['cached']) {
+                    usleep(500000); // 0.5 second delay
+                }
             }
 
-            // Prepare point
+            // Prepare point with content hash for future cache lookups
             $points[] = [
                 'id' => $chunk['id'],
-                'vector' => $embedding['vector'],
+                'vector' => $vector,
                 'payload' => array_merge(
-                    ['text' => $chunk['text']],
+                    [
+                        'text' => $chunk['text'],
+                        'content_hash' => $content_hash, // Add hash for cache lookups
+                    ],
                     $chunk['metadata']
                 ),
             ];
@@ -211,11 +234,6 @@ class Indexer
             if (count($points) >= $this->config->batch_size) {
                 $this->qdrant->uploadPoints($points);
                 $points = [];
-            }
-
-            // Rate limiting for new embeddings
-            if (!$embedding['cached']) {
-                usleep(500000); // 0.5 second delay
             }
         }
 

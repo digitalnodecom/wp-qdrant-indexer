@@ -30,6 +30,30 @@ class QdrantClient
             ],
         ]);
 
+        if (is_wp_error($response)) {
+            return false;
+        }
+
+        // Create index on content_hash for fast embedding cache lookups
+        $this->createPayloadIndex('content_hash', 'keyword');
+
+        return true;
+    }
+
+    /**
+     * Create a payload index for fast filtering
+     */
+    private function createPayloadIndex(string $field_name, string $schema_type): bool
+    {
+        $response = $this->request(
+            'PUT',
+            "/collections/{$this->config->collection_name}/index",
+            [
+                'field_name' => $field_name,
+                'field_schema' => $schema_type,
+            ]
+        );
+
         return !is_wp_error($response);
     }
 
@@ -86,6 +110,36 @@ class QdrantClient
 
         $body = json_decode(wp_remote_retrieve_body($response), true);
         return $body['result'] ?? [];
+    }
+
+    /**
+     * Search for existing point by content hash
+     * Used for embedding cache across different sites
+     */
+    public function searchByContentHash(string $content_hash): ?array
+    {
+        $response = $this->request('POST', "/collections/{$this->config->collection_name}/points/scroll", [
+            'filter' => [
+                'must' => [
+                    [
+                        'key' => 'content_hash',
+                        'match' => ['value' => $content_hash]
+                    ]
+                ]
+            ],
+            'limit' => 1,
+            'with_payload' => true,
+            'with_vector' => true,
+        ]);
+
+        if (is_wp_error($response)) {
+            return null;
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $points = $body['result']['points'] ?? [];
+
+        return !empty($points) ? $points[0] : null;
     }
 
     /**
