@@ -159,10 +159,41 @@ class QdrantClient
         ];
 
         if ($body !== null) {
-            $args['body'] = json_encode($body);
+            // Sanitize body to ensure valid UTF-8 before encoding
+            $body = $this->sanitizeForJson($body);
+            $encoded = json_encode($body);
+
+            if ($encoded === false) {
+                error_log('Qdrant: json_encode failed - ' . json_last_error_msg());
+                return new \WP_Error('json_encode_failed', json_last_error_msg());
+            }
+
+            $args['body'] = $encoded;
         }
 
         return wp_remote_request($url, $args);
+    }
+
+    /**
+     * Recursively sanitize data for JSON encoding (fix invalid UTF-8)
+     */
+    private function sanitizeForJson($data)
+    {
+        if (is_string($data)) {
+            // Remove invalid UTF-8 sequences
+            $data = mb_convert_encoding($data, 'UTF-8', 'UTF-8');
+            // Remove null bytes and other control characters except newlines/tabs
+            $data = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $data);
+            return $data;
+        }
+
+        if (is_array($data)) {
+            foreach ($data as $key => $value) {
+                $data[$key] = $this->sanitizeForJson($value);
+            }
+        }
+
+        return $data;
     }
 
     /**
