@@ -65,15 +65,25 @@ class Embedder
      */
     private function generateEmbedding(string $text, int $retry_count = 0): ?array
     {
+        // Sanitize text to ensure valid UTF-8
+        $text = $this->sanitizeUtf8($text);
+
+        $body = json_encode([
+            'model' => 'text-embedding-3-small',
+            'input' => $text,
+        ]);
+
+        if ($body === false) {
+            error_log('OpenAI embedding: json_encode failed - ' . json_last_error_msg());
+            return null;
+        }
+
         $response = wp_remote_post('https://api.openai.com/v1/embeddings', [
             'headers' => [
                 'Authorization' => 'Bearer ' . $this->config->openai_api_key,
                 'Content-Type' => 'application/json',
             ],
-            'body' => json_encode([
-                'model' => 'text-embedding-3-small',
-                'input' => $text,
-            ]),
+            'body' => $body,
             'timeout' => 30,
         ]);
 
@@ -145,5 +155,17 @@ class Embedder
     {
         $this->cached_count = 0;
         $this->new_count = 0;
+    }
+
+    /**
+     * Sanitize string to ensure valid UTF-8
+     */
+    private function sanitizeUtf8(string $text): string
+    {
+        // Remove invalid UTF-8 sequences
+        $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+        // Remove null bytes and other control characters except newlines/tabs
+        $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $text);
+        return $text;
     }
 }
