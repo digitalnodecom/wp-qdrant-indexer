@@ -161,11 +161,14 @@ class QdrantClient
         if ($body !== null) {
             // Sanitize body to ensure valid UTF-8 before encoding
             $body = $this->sanitizeForJson($body);
-            $encoded = json_encode($body);
 
-            if ($encoded === false) {
-                error_log('Qdrant: json_encode failed - ' . json_last_error_msg());
-                return new \WP_Error('json_encode_failed', json_last_error_msg());
+            // Use flags to handle remaining edge cases
+            $encoded = json_encode($body, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+            if ($encoded === false || json_last_error() !== JSON_ERROR_NONE) {
+                $error = json_last_error_msg();
+                error_log('Qdrant: json_encode failed - ' . $error);
+                return new \WP_Error('json_encode_failed', $error);
             }
 
             $args['body'] = $encoded;
@@ -175,15 +178,26 @@ class QdrantClient
     }
 
     /**
-     * Recursively sanitize data for JSON encoding (fix invalid UTF-8)
+     * Recursively sanitize data for JSON encoding (fix invalid UTF-8, NaN, Infinity)
      */
     private function sanitizeForJson($data)
     {
         if (is_string($data)) {
             // Remove invalid UTF-8 sequences
-            $data = mb_convert_encoding($data, 'UTF-8', 'UTF-8');
+            $converted = mb_convert_encoding($data, 'UTF-8', 'UTF-8');
+            if ($converted === false) {
+                $converted = '';
+            }
             // Remove null bytes and other control characters except newlines/tabs
-            $data = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $data);
+            $cleaned = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $converted);
+            return $cleaned ?? $converted;
+        }
+
+        if (is_float($data)) {
+            // Handle NaN and Infinity which can't be JSON encoded
+            if (is_nan($data) || is_infinite($data)) {
+                return 0.0;
+            }
             return $data;
         }
 
