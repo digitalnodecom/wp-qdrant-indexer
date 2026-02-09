@@ -31,12 +31,19 @@ class RAGEngine
 
     /**
      * Query the RAG system
+     *
+     * @param string $question The user's question
+     * @param array $conversation_history Previous conversation messages
+     * @param int $search_limit Maximum number of results to retrieve
+     * @param float $score_threshold Minimum similarity score
+     * @param string|null $language Filter results by language (e.g., 'en', 'de')
      */
     public function query(
         string $question,
         array $conversation_history = [],
         int $search_limit = 5,
-        float $score_threshold = 0.5
+        float $score_threshold = 0.5,
+        ?string $language = null
     ): array {
         // Step 1: Generate embedding for the question
         $embedding = $this->embedder->getEmbedding($question, 'query_' . md5($question));
@@ -48,12 +55,19 @@ class RAGEngine
             ];
         }
 
+        // Build language filter if specified
+        $filter = null;
+        if ($language !== null) {
+            $filter = QdrantClient::buildLanguageFilter($language);
+        }
+
         // Step 2: Search Qdrant for relevant content
         $search_results = $this->qdrant->search(
             $embedding['vector'],
             $search_limit,
             $score_threshold,
-            true
+            true,
+            $filter
         );
 
         // Step 3: Build context from search results (or note if no results)

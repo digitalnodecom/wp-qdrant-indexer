@@ -60,38 +60,7 @@ foreach ($autoload_paths as $autoload_path) {
  * Register WP-CLI commands if WP-CLI is available
  */
 if (defined('WP_CLI') && WP_CLI) {
-    WP_CLI::add_command('qdrant-indexer', function ($args, $assoc_args) {
-        $subcommand = $args[0] ?? 'help';
-
-        switch ($subcommand) {
-            case 'index':
-                WP_CLI::log('To index content, use the indexing scripts or create your own using the package classes.');
-                WP_CLI::log('See: https://github.com/digitalnodecom/wp-qdrant-indexer for documentation.');
-                break;
-
-            case 'info':
-                WP_CLI::success('WP Qdrant Indexer v' . WP_QDRANT_INDEXER_VERSION);
-                WP_CLI::log('Available classes:');
-                WP_CLI::log('  - DigitalNode\\WPQdrantIndexer\\Config');
-                WP_CLI::log('  - DigitalNode\\WPQdrantIndexer\\Indexer');
-                WP_CLI::log('  - DigitalNode\\WPQdrantIndexer\\RAGEngine');
-                WP_CLI::log('  - DigitalNode\\WPQdrantIndexer\\QdrantClient');
-                WP_CLI::log('  - DigitalNode\\WPQdrantIndexer\\Embedder');
-                WP_CLI::log('  - DigitalNode\\WPQdrantIndexer\\ContentExtractor');
-                break;
-
-            default:
-                WP_CLI::log('WP Qdrant Indexer - WordPress content indexer for Qdrant');
-                WP_CLI::log('');
-                WP_CLI::log('Usage: wp qdrant-indexer <command>');
-                WP_CLI::log('');
-                WP_CLI::log('Commands:');
-                WP_CLI::log('  info    Show plugin information and available classes');
-                WP_CLI::log('  index   Show indexing instructions');
-                WP_CLI::log('  help    Show this help message');
-                break;
-        }
-    });
+    WP_CLI::add_command('qdrant', DigitalNode\WPQdrantIndexer\CLI::class);
 }
 
 /**

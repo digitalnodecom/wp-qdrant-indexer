@@ -37,6 +37,9 @@ class QdrantClient
         // Create index on content_hash for fast embedding cache lookups
         $this->createPayloadIndex('content_hash', 'keyword');
 
+        // Create index on language for fast language filtering
+        $this->createPayloadIndex('language', 'keyword');
+
         return true;
     }
 
@@ -89,19 +92,32 @@ class QdrantClient
 
     /**
      * Search for similar vectors
+     *
+     * @param array $vector The query vector
+     * @param int $limit Maximum results to return
+     * @param float $score_threshold Minimum similarity score
+     * @param bool $with_payload Include payload in results
+     * @param array|null $filter Optional Qdrant filter (e.g., ['must' => [['key' => 'language', 'match' => ['value' => 'en']]]])
      */
     public function search(
         array $vector,
         int $limit = 5,
         float $score_threshold = 0.5,
-        bool $with_payload = true
+        bool $with_payload = true,
+        ?array $filter = null
     ): array {
-        $response = $this->request('POST', "/collections/{$this->config->collection_name}/points/search", [
+        $body = [
             'vector' => $vector,
             'limit' => $limit,
             'score_threshold' => $score_threshold,
             'with_payload' => $with_payload,
-        ]);
+        ];
+
+        if ($filter !== null) {
+            $body['filter'] = $filter;
+        }
+
+        $response = $this->request('POST', "/collections/{$this->config->collection_name}/points/search", $body);
 
         if (is_wp_error($response)) {
             error_log('Qdrant search error: ' . $response->get_error_message());
@@ -110,6 +126,24 @@ class QdrantClient
 
         $body = json_decode(wp_remote_retrieve_body($response), true);
         return $body['result'] ?? [];
+    }
+
+    /**
+     * Build a language filter for Qdrant queries
+     *
+     * @param string $language Language code (e.g., 'en', 'de', 'fr')
+     * @return array Qdrant filter array
+     */
+    public static function buildLanguageFilter(string $language): array
+    {
+        return [
+            'must' => [
+                [
+                    'key' => 'language',
+                    'match' => ['value' => $language]
+                ]
+            ]
+        ];
     }
 
     /**
