@@ -6,28 +6,18 @@ namespace DigitalNode\WPQdrantIndexer;
  * WP-CLI Commands for Qdrant Indexer
  *
  * Indexes WordPress content to Qdrant vector database.
- * Extracts all post meta, taxonomies, and content automatically.
+ * Supports multilingual sites with separate collections per language.
  */
 class CLI
 {
+    private string $base_collection;
     private Config $config;
-    private QdrantClient $qdrant;
-    private Embedder $embedder;
+    private ?QdrantClient $qdrant = null;
+    private ?Embedder $embedder = null;
 
     public function __construct()
     {
-        $this->config = new Config([
-            'openai_api_key' => $this->getEnv('OPENAI_API_KEY'),
-            'qdrant_url' => $this->getEnv('QDRANT_URL'),
-            'qdrant_api_key' => $this->getEnv('QDRANT_API_KEY'),
-            'collection_name' => $this->getEnv('QDRANT_COLLECTION', 'wp_content'),
-            'chunk_size' => 25000,
-            'batch_size' => 50,
-            'enable_cache' => true,
-        ]);
-
-        $this->qdrant = new QdrantClient($this->config);
-        $this->embedder = new Embedder($this->config);
+        $this->base_collection = $this->getEnv('QDRANT_COLLECTION', 'wp_content');
     }
 
     /**
@@ -35,22 +25,18 @@ class CLI
      */
     private function getEnv(string $key, string $default = ''): string
     {
-        // Check for constant first
         if (defined($key)) {
             return constant($key);
         }
 
-        // Check for env() function (Bedrock)
         if (function_exists('env')) {
             return env($key, $default);
         }
 
-        // Check $_ENV
         if (isset($_ENV[$key])) {
             return $_ENV[$key];
         }
 
-        // Check getenv()
         $value = getenv($key);
         if ($value !== false) {
             return $value;
@@ -60,9 +46,53 @@ class CLI
     }
 
     /**
+     * Get Config instance for a specific language collection
+     */
+    private function getConfig(string $language): Config
+    {
+        return new Config([
+            'openai_api_key' => $this->getEnv('OPENAI_API_KEY'),
+            'qdrant_url' => $this->getEnv('QDRANT_URL'),
+            'qdrant_api_key' => $this->getEnv('QDRANT_API_KEY'),
+            'collection_name' => $this->base_collection . '_' . $language,
+            'chunk_size' => 25000,
+            'batch_size' => 50,
+            'enable_cache' => true,
+        ]);
+    }
+
+    /**
+     * Get available languages from Polylang/WPML or default
+     */
+    private function getAvailableLanguages(): array
+    {
+        // Polylang
+        if (function_exists('pll_languages_list')) {
+            $languages = pll_languages_list(['fields' => 'slug']);
+            if (!empty($languages)) {
+                return $languages;
+            }
+        }
+
+        // WPML
+        if (function_exists('icl_get_languages')) {
+            $languages = icl_get_languages('skip_missing=0');
+            if (!empty($languages)) {
+                return array_keys($languages);
+            }
+        }
+
+        // Default to site language
+        return [substr(get_locale(), 0, 2)];
+    }
+
+    /**
      * Sync content to Qdrant vector database.
      *
      * ## OPTIONS
+     *
+     * [<language>]
+     * : Language to sync (e.g., 'en', 'de'). Use 'all' or omit to sync all languages.
      *
      * [--post_type=<type>]
      * : Specific post type to sync (default: all public post types)
@@ -71,95 +101,163 @@ class CLI
      * : Delete and recreate Qdrant collection (default: true)
      *
      * [--limit=<number>]
-     * : Limit number of posts to sync (for testing)
+     * : Limit number of posts to sync per language (for testing)
      *
      * ## EXAMPLES
      *
      *     wp qdrant sync
-     *     wp qdrant sync --post_type=product
-     *     wp qdrant sync --limit=50
-     *     wp qdrant sync --recreate=false
+     *     wp qdrant sync en
+     *     wp qdrant sync de --recreate=false
+     *     wp qdrant sync all --post_type=product
+     *     wp qdrant sync en --limit=50
      *
      * @when after_wp_load
      */
     public function sync($args, $assoc_args)
     {
-        // Remove time limits for long-running indexing
         set_time_limit(0);
         ini_set('max_execution_time', '0');
 
+        $language_arg = $args[0] ?? 'all';
         $recreate = !isset($assoc_args['recreate']) || $assoc_args['recreate'] !== 'false';
         $limit = isset($assoc_args['limit']) ? (int) $assoc_args['limit'] : 0;
         $specific_type = $assoc_args['post_type'] ?? null;
 
-        \WP_CLI::log("Starting Qdrant sync...");
-        \WP_CLI::log("Collection: {$this->config->collection_name}\n");
+        // Determine which languages to sync
+        $available_languages = $this->getAvailableLanguages();
 
-        // Step 1: Setup collection
-        if ($recreate) {
-            \WP_CLI::log("Recreating Qdrant collection...");
-            $this->qdrant->createCollection(true);
+        if ($language_arg === 'all') {
+            $languages_to_sync = $available_languages;
         } else {
-            \WP_CLI::log("Using existing Qdrant collection...");
-            if (!$this->qdrant->collectionExists()) {
-                $this->qdrant->createCollection(false);
+            if (!in_array($language_arg, $available_languages)) {
+                \WP_CLI::error("Language '{$language_arg}' not found. Available: " . implode(', ', $available_languages));
+            }
+            $languages_to_sync = [$language_arg];
+        }
+
+        \WP_CLI::log("Starting Qdrant sync...");
+        \WP_CLI::log("Base collection: {$this->base_collection}");
+        \WP_CLI::log("Languages to sync: " . implode(', ', $languages_to_sync) . "\n");
+
+        $total_start_time = microtime(true);
+        $grand_total_chunks = 0;
+
+        foreach ($languages_to_sync as $language) {
+            $chunks = $this->syncLanguage($language, $specific_type, $limit, $recreate);
+            $grand_total_chunks += $chunks;
+        }
+
+        $total_elapsed = round(microtime(true) - $total_start_time, 2);
+
+        \WP_CLI::log("\n" . str_repeat("=", 50));
+        \WP_CLI::success("All sync complete!");
+        \WP_CLI::log("   Total chunks across all languages: {$grand_total_chunks}");
+        \WP_CLI::log("   Total time elapsed: {$total_elapsed}s");
+    }
+
+    /**
+     * Sync a single language to its collection
+     */
+    private function syncLanguage(string $language, ?string $specific_type, int $limit, bool $recreate): int
+    {
+        $config = $this->getConfig($language);
+        $qdrant = new QdrantClient($config);
+        $embedder = new Embedder($config);
+
+        \WP_CLI::log(str_repeat("-", 50));
+        \WP_CLI::log("Syncing language: {$language}");
+        \WP_CLI::log("Collection: {$config->collection_name}\n");
+
+        // Setup collection
+        if ($recreate) {
+            \WP_CLI::log("Recreating collection...");
+            $qdrant->createCollection(true);
+        } else {
+            \WP_CLI::log("Using existing collection...");
+            if (!$qdrant->collectionExists()) {
+                $qdrant->createCollection(false);
             }
         }
 
-        // Step 2: Get post types to index
+        // Get post types
         $post_types = $this->getPostTypesToIndex($specific_type);
 
         if (empty($post_types)) {
-            \WP_CLI::error('No post types to index.');
+            \WP_CLI::warning("No post types to index for {$language}.");
+            return 0;
         }
 
-        \WP_CLI::log("Post types to index: " . implode(', ', $post_types) . "\n");
+        \WP_CLI::log("Post types: " . implode(', ', $post_types) . "\n");
 
-        // Step 3: Gather and process content
+        // Process each post type
         $total_chunks = 0;
         $global_chunk_id = 0;
         $start_time = microtime(true);
 
         foreach ($post_types as $post_type) {
-            $result = $this->processPostType($post_type, $limit, $recreate, $global_chunk_id);
+            $result = $this->processPostType(
+                $post_type,
+                $language,
+                $limit,
+                $recreate,
+                $global_chunk_id,
+                $qdrant,
+                $embedder,
+                $config
+            );
             $total_chunks += $result['uploaded'];
             $global_chunk_id = $result['next_id'];
         }
 
         $elapsed = round(microtime(true) - $start_time, 2);
-        $stats = $this->embedder->getCacheStats();
+        $stats = $embedder->getCacheStats();
 
-        \WP_CLI::log("\n" . str_repeat("=", 50));
-        \WP_CLI::success("Qdrant sync complete!");
-        \WP_CLI::log("   Total chunks uploaded: {$total_chunks}");
-        \WP_CLI::log("   Time elapsed: {$elapsed}s");
-        \WP_CLI::log("   Cache stats:");
-        \WP_CLI::log("     - Local cache hits: {$stats['cached']}");
-        \WP_CLI::log("     - New embeddings: {$stats['new']}");
-        \WP_CLI::log("     - Cache hit rate: {$stats['cache_hit_rate']}%");
+        \WP_CLI::log("Language '{$language}' complete:");
+        \WP_CLI::log("   Chunks uploaded: {$total_chunks}");
+        \WP_CLI::log("   Time: {$elapsed}s");
+        \WP_CLI::log("   Cache hits: {$stats['cached']}, New: {$stats['new']}\n");
+
+        return $total_chunks;
     }
 
     /**
      * Show Qdrant collection statistics.
      *
+     * ## OPTIONS
+     *
+     * [<language>]
+     * : Language collection to check (e.g., 'en'). Omit to show all.
+     *
      * ## EXAMPLES
      *
      *     wp qdrant stats
+     *     wp qdrant stats en
      *
      * @when after_wp_load
      */
     public function stats($args, $assoc_args)
     {
-        $info = $this->qdrant->getCollectionInfo();
+        $language_arg = $args[0] ?? null;
+        $languages = $language_arg ? [$language_arg] : $this->getAvailableLanguages();
 
-        if (!$info) {
-            \WP_CLI::error('Could not retrieve collection info. Is Qdrant running?');
+        \WP_CLI::log("Qdrant Collection Stats");
+        \WP_CLI::log("Base: {$this->base_collection}\n");
+
+        foreach ($languages as $language) {
+            $config = $this->getConfig($language);
+            $qdrant = new QdrantClient($config);
+            $info = $qdrant->getCollectionInfo();
+
+            \WP_CLI::log("Collection: {$config->collection_name}");
+            if ($info) {
+                \WP_CLI::log("   Points: " . ($info['points_count'] ?? 'N/A'));
+                \WP_CLI::log("   Vectors: " . ($info['vectors_count'] ?? 'N/A'));
+                \WP_CLI::log("   Status: " . ($info['status'] ?? 'N/A'));
+            } else {
+                \WP_CLI::log("   Status: Not found or not accessible");
+            }
+            \WP_CLI::log("");
         }
-
-        \WP_CLI::log("Qdrant Collection: {$this->config->collection_name}");
-        \WP_CLI::log("   Points: " . ($info['points_count'] ?? 'N/A'));
-        \WP_CLI::log("   Vectors: " . ($info['vectors_count'] ?? 'N/A'));
-        \WP_CLI::log("   Status: " . ($info['status'] ?? 'N/A'));
     }
 
     /**
@@ -173,8 +271,33 @@ class CLI
      */
     public function clear_cache($args, $assoc_args)
     {
-        $deleted = $this->embedder->clearCache();
+        // Use any language config just to get an embedder instance
+        $languages = $this->getAvailableLanguages();
+        $config = $this->getConfig($languages[0]);
+        $embedder = new Embedder($config);
+
+        $deleted = $embedder->clearCache();
         \WP_CLI::success("Cleared {$deleted} cached embeddings.");
+    }
+
+    /**
+     * List available languages.
+     *
+     * ## EXAMPLES
+     *
+     *     wp qdrant languages
+     *
+     * @when after_wp_load
+     */
+    public function languages($args, $assoc_args)
+    {
+        $languages = $this->getAvailableLanguages();
+
+        \WP_CLI::log("Available languages: " . implode(', ', $languages));
+        \WP_CLI::log("\nCollection names:");
+        foreach ($languages as $lang) {
+            \WP_CLI::log("   {$lang} → {$this->base_collection}_{$lang}");
+        }
     }
 
     /**
@@ -186,40 +309,64 @@ class CLI
             return [$specific_type];
         }
 
-        // Get all public post types
         $post_types = get_post_types(['public' => true], 'names');
         unset($post_types['attachment']);
 
-        // Allow filtering
         return apply_filters('qdrant_indexer_post_types', array_values($post_types));
     }
 
     /**
-     * Process a single post type
+     * Get posts for a specific language
      */
-    private function processPostType(
-        string $post_type,
-        int $limit,
-        bool $skip_qdrant_cache,
-        int $start_chunk_id
-    ): array {
-        \WP_CLI::log("Processing {$post_type}...");
-
+    private function getPostsForLanguage(string $post_type, string $language, int $limit): array
+    {
         $args = [
             'post_type' => $post_type,
             'post_status' => 'publish',
             'posts_per_page' => $limit > 0 ? $limit : -1,
+            'suppress_filters' => false,
         ];
 
-        $posts = get_posts($args);
+        // Polylang
+        if (function_exists('pll_get_post_language')) {
+            $args['lang'] = $language;
+        }
+
+        // WPML - set language context
+        if (function_exists('icl_get_languages')) {
+            global $sitepress;
+            if ($sitepress) {
+                $sitepress->switch_lang($language);
+            }
+        }
+
+        return get_posts($args);
+    }
+
+    /**
+     * Process a single post type for a language
+     */
+    private function processPostType(
+        string $post_type,
+        string $language,
+        int $limit,
+        bool $skip_qdrant_cache,
+        int $start_chunk_id,
+        QdrantClient $qdrant,
+        Embedder $embedder,
+        Config $config
+    ): array {
+        \WP_CLI::log("Processing {$post_type}...");
+
+        $posts = $this->getPostsForLanguage($post_type, $language, $limit);
         $total = count($posts);
 
         if ($total === 0) {
-            \WP_CLI::log("   No {$post_type} posts found.\n");
+            \WP_CLI::log("   No {$post_type} posts found for '{$language}'.\n");
             return ['uploaded' => 0, 'next_id' => $start_chunk_id];
         }
 
-        \WP_CLI::log("   Found {$total} posts to process...");
+        \WP_CLI::log("   Found {$total} posts...");
 
         $chunk_id = $start_chunk_id;
         $points = [];
@@ -227,36 +374,29 @@ class CLI
         $failed_count = 0;
 
         foreach ($posts as $index => $post) {
-            // Extract content using ContentExtractor
             $document = ContentExtractor::getDocument($post->ID);
             $text = ContentExtractor::documentToText($document);
 
             $title = $document['title'] ?? $post->post_title;
             $url = $document['permalink'] ?? get_permalink($post->ID);
 
-            // Get language (Polylang/WPML support)
-            $language = $this->getPostLanguage($post->ID);
-
-            // Skip if too short
             if (strlen($text) < 100) {
                 continue;
             }
 
-            // Chunk the content
-            $post_chunks = $this->chunkText($text, $post->ID);
+            $post_chunks = $this->chunkText($text, $post->ID, $config);
 
             foreach ($post_chunks as $chunk) {
                 $chunk['id'] = $chunk_id++;
 
-                // Generate embedding
                 $content_hash = md5($chunk['text']);
-                $existing_point = !$skip_qdrant_cache ? $this->qdrant->searchByContentHash($content_hash) : null;
+                $existing_point = !$skip_qdrant_cache ? $qdrant->searchByContentHash($content_hash) : null;
 
                 if ($existing_point) {
                     $vector = $existing_point['vector'];
                 } else {
                     $cache_key = $chunk['post_id'] . '_' . $chunk['id'];
-                    $embedding = $this->embedder->getEmbedding($chunk['text'], $cache_key);
+                    $embedding = $embedder->getEmbedding($chunk['text'], $cache_key);
 
                     if (!$embedding) {
                         \WP_CLI::warning("Failed to embed chunk for post {$chunk['post_id']}, skipping...");
@@ -265,9 +405,8 @@ class CLI
 
                     $vector = $embedding['vector'];
 
-                    // Rate limiting for new embeddings
                     if (!$embedding['cached']) {
-                        usleep(100000); // 0.1 second delay
+                        usleep(100000);
                     }
                 }
 
@@ -285,12 +424,11 @@ class CLI
                     ],
                 ];
 
-                // Upload in batches
-                if (count($points) >= $this->config->batch_size) {
+                if (count($points) >= $config->batch_size) {
                     $batch_count = count($points);
-                    $success = $this->qdrant->uploadPoints($points);
+                    $success = $qdrant->uploadPoints($points);
                     if (!$success) {
-                        \WP_CLI::warning("Failed to upload batch of {$batch_count} points to Qdrant!");
+                        \WP_CLI::warning("Failed to upload batch!");
                         $failed_count += $batch_count;
                     } else {
                         $uploaded_count += $batch_count;
@@ -299,63 +437,34 @@ class CLI
                 }
             }
 
-            // Progress
             $progress = $index + 1;
-            $stats = $this->embedder->getCacheStats();
+            $stats = $embedder->getCacheStats();
             \WP_CLI::log("   Processed {$progress}/{$total} (cached: {$stats['cached']}, new: {$stats['new']})");
         }
 
-        // Upload remaining points
         if (!empty($points)) {
             $batch_count = count($points);
-            $success = $this->qdrant->uploadPoints($points);
+            $success = $qdrant->uploadPoints($points);
             if (!$success) {
-                \WP_CLI::warning("Failed to upload final batch of {$batch_count} points to Qdrant!");
                 $failed_count += $batch_count;
             } else {
                 $uploaded_count += $batch_count;
             }
         }
 
-        \WP_CLI::log("   {$post_type} complete: {$uploaded_count} uploaded, {$failed_count} failed\n");
+        \WP_CLI::log("   {$post_type}: {$uploaded_count} uploaded, {$failed_count} failed\n");
 
         return ['uploaded' => $uploaded_count, 'next_id' => $chunk_id];
     }
 
     /**
-     * Get post language using Polylang, WPML, or default
-     */
-    private function getPostLanguage(int $post_id): string
-    {
-        // Polylang
-        if (function_exists('pll_get_post_language')) {
-            $lang = pll_get_post_language($post_id, 'slug');
-            if ($lang) {
-                return $lang;
-            }
-        }
-
-        // WPML
-        if (function_exists('wpml_get_language_information')) {
-            $lang_info = wpml_get_language_information(null, $post_id);
-            if (!empty($lang_info['language_code'])) {
-                return $lang_info['language_code'];
-            }
-        }
-
-        // Default to site language
-        return substr(get_locale(), 0, 2);
-    }
-
-    /**
      * Chunk text into smaller pieces
      */
-    private function chunkText(string $text, int $post_id): array
+    private function chunkText(string $text, int $post_id, Config $config): array
     {
         $chunks = [];
 
-        // If content fits in one chunk
-        if (strlen($text) <= $this->config->chunk_size) {
+        if (strlen($text) <= $config->chunk_size) {
             $chunks[] = [
                 'post_id' => $post_id,
                 'text' => $text,
@@ -363,15 +472,13 @@ class CLI
             return $chunks;
         }
 
-        // Split into chunks
         $start = 0;
         while ($start < strlen($text)) {
-            $chunk_text = substr($text, $start, $this->config->chunk_size);
+            $chunk_text = substr($text, $start, $config->chunk_size);
 
-            // Try to end at sentence boundary
-            if ($start + $this->config->chunk_size < strlen($text)) {
+            if ($start + $config->chunk_size < strlen($text)) {
                 $last_period = strrpos($chunk_text, '.');
-                if ($last_period !== false && $last_period > $this->config->chunk_size / 2) {
+                if ($last_period !== false && $last_period > $config->chunk_size / 2) {
                     $chunk_text = substr($chunk_text, 0, $last_period + 1);
                 }
             }
