@@ -379,12 +379,24 @@ class CLI
 
             $title = $document['title'] ?? $post->post_title;
             $url = $document['permalink'] ?? get_permalink($post->ID);
+            $text_length = strlen($text);
 
-            if (strlen($text) < 100) {
+            // Show what's being processed
+            $progress = $index + 1;
+            \WP_CLI::log("   [{$progress}/{$total}] #{$post->ID}: {$title}");
+
+            if ($text_length < 100) {
+                \WP_CLI::log("      ⏭ Skipped (content too short: {$text_length} chars)");
                 continue;
             }
 
             $post_chunks = $this->chunkText($text, $post->ID, $config);
+            $chunk_count = count($post_chunks);
+            \WP_CLI::log("      📄 {$text_length} chars → {$chunk_count} chunk(s)");
+
+            $post_cached = 0;
+            $post_new = 0;
+            $post_failed = 0;
 
             foreach ($post_chunks as $chunk) {
                 $chunk['id'] = $chunk_id++;
@@ -394,18 +406,22 @@ class CLI
 
                 if ($existing_point) {
                     $vector = $existing_point['vector'];
+                    $post_cached++;
                 } else {
                     $cache_key = $chunk['post_id'] . '_' . $chunk['id'];
                     $embedding = $embedder->getEmbedding($chunk['text'], $cache_key);
 
                     if (!$embedding) {
-                        \WP_CLI::warning("Failed to embed chunk for post {$chunk['post_id']}, skipping...");
+                        $post_failed++;
                         continue;
                     }
 
                     $vector = $embedding['vector'];
 
-                    if (!$embedding['cached']) {
+                    if ($embedding['cached']) {
+                        $post_cached++;
+                    } else {
+                        $post_new++;
                         usleep(100000);
                     }
                 }
@@ -423,23 +439,30 @@ class CLI
                         'language' => $language,
                     ],
                 ];
+            }
+
+            // Show embedding stats for this post
+            $embed_info = [];
+            if ($post_cached > 0) $embed_info[] = "cached: {$post_cached}";
+            if ($post_new > 0) $embed_info[] = "new: {$post_new}";
+            if ($post_failed > 0) $embed_info[] = "failed: {$post_failed}";
+            if (!empty($embed_info)) {
+                \WP_CLI::log("      🔢 Embeddings: " . implode(', ', $embed_info));
+            }
 
                 if (count($points) >= $config->batch_size) {
                     $batch_count = count($points);
                     $success = $qdrant->uploadPoints($points);
                     if (!$success) {
-                        \WP_CLI::warning("Failed to upload batch!");
+                        \WP_CLI::warning("      ❌ Failed to upload batch of {$batch_count} points!");
                         $failed_count += $batch_count;
                     } else {
                         $uploaded_count += $batch_count;
+                        \WP_CLI::log("      ✅ Uploaded batch of {$batch_count} points");
                     }
                     $points = [];
                 }
             }
-
-            $progress = $index + 1;
-            $stats = $embedder->getCacheStats();
-            \WP_CLI::log("   Processed {$progress}/{$total} (cached: {$stats['cached']}, new: {$stats['new']})");
         }
 
         if (!empty($points)) {
