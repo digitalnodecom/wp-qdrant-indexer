@@ -439,17 +439,8 @@ class CLI
                         'language' => $language,
                     ],
                 ];
-            }
 
-            // Show embedding stats for this post
-            $embed_info = [];
-            if ($post_cached > 0) $embed_info[] = "cached: {$post_cached}";
-            if ($post_new > 0) $embed_info[] = "new: {$post_new}";
-            if ($post_failed > 0) $embed_info[] = "failed: {$post_failed}";
-            if (!empty($embed_info)) {
-                \WP_CLI::log("      🔢 Embeddings: " . implode(', ', $embed_info));
-            }
-
+                // Batch upload when enough points accumulated
                 if (count($points) >= $config->batch_size) {
                     $batch_count = count($points);
                     $success = $qdrant->uploadPoints($points);
@@ -462,6 +453,15 @@ class CLI
                     }
                     $points = [];
                 }
+            }
+
+            // Show embedding stats for this post
+            $embed_info = [];
+            if ($post_cached > 0) $embed_info[] = "cached: {$post_cached}";
+            if ($post_new > 0) $embed_info[] = "new: {$post_new}";
+            if ($post_failed > 0) $embed_info[] = "failed: {$post_failed}";
+            if (!empty($embed_info)) {
+                \WP_CLI::log("      🔢 Embeddings: " . implode(', ', $embed_info));
             }
         }
 
