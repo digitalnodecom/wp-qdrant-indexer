@@ -14,6 +14,8 @@ class CLI
     private Config $config;
     private ?QdrantClient $qdrant = null;
     private ?Embedder $embedder = null;
+    private ?string $log_file = null;
+    private array $log_data = [];
 
     public function __construct()
     {
@@ -135,6 +137,16 @@ class CLI
             $languages_to_sync = [$language_arg];
         }
 
+        // Create log file
+        $date = date('Y-m-d_H-i-s');
+        $this->log_file = getcwd() . "/qdrant-index-{$language_arg}-{$date}.txt";
+        $this->log_data = [
+            'started_at' => date('Y-m-d H:i:s'),
+            'languages' => $languages_to_sync,
+            'base_collection' => $this->base_collection,
+            'posts' => [],
+        ];
+
         \WP_CLI::log("Starting Qdrant sync...");
         \WP_CLI::log("Base collection: {$this->base_collection}");
         \WP_CLI::log("Languages to sync: " . implode(', ', $languages_to_sync) . "\n");
@@ -149,10 +161,71 @@ class CLI
 
         $total_elapsed = round(microtime(true) - $total_start_time, 2);
 
+        // Write log file
+        $this->writeLogFile($grand_total_chunks, $total_elapsed);
+
         \WP_CLI::log("\n" . str_repeat("=", 50));
         \WP_CLI::success("All sync complete!");
         \WP_CLI::log("   Total chunks across all languages: {$grand_total_chunks}");
         \WP_CLI::log("   Total time elapsed: {$total_elapsed}s");
+        \WP_CLI::log("   Log file: {$this->log_file}");
+    }
+
+    /**
+     * Write the index log file
+     */
+    private function writeLogFile(int $total_chunks, float $elapsed): void
+    {
+        $content = "QDRANT INDEX LOG\n";
+        $content .= str_repeat("=", 60) . "\n\n";
+        $content .= "Started: {$this->log_data['started_at']}\n";
+        $content .= "Finished: " . date('Y-m-d H:i:s') . "\n";
+        $content .= "Duration: {$elapsed}s\n";
+        $content .= "Base Collection: {$this->log_data['base_collection']}\n";
+        $content .= "Languages: " . implode(', ', $this->log_data['languages']) . "\n";
+        $content .= "Total Chunks: {$total_chunks}\n";
+        $content .= "\n" . str_repeat("=", 60) . "\n";
+        $content .= "INDEXED POSTS\n";
+        $content .= str_repeat("=", 60) . "\n\n";
+
+        $indexed_count = 0;
+        $skipped_count = 0;
+
+        foreach ($this->log_data['posts'] as $post) {
+            if ($post['status'] === 'indexed') {
+                $indexed_count++;
+                $content .= "[INDEXED] #{$post['id']} | {$post['language']} | {$post['type']}\n";
+                $content .= "  Title: {$post['title']}\n";
+                $content .= "  URL: {$post['url']}\n";
+                $content .= "  Content: {$post['content_length']} chars → {$post['chunks']} chunk(s)\n";
+                $content .= "  Embeddings: {$post['embeddings']}\n";
+                $content .= "\n";
+            } else {
+                $skipped_count++;
+                $content .= "[SKIPPED] #{$post['id']} | {$post['language']} | {$post['type']}\n";
+                $content .= "  Title: {$post['title']}\n";
+                $content .= "  Reason: {$post['reason']}\n";
+                $content .= "\n";
+            }
+        }
+
+        $content .= str_repeat("=", 60) . "\n";
+        $content .= "SUMMARY\n";
+        $content .= str_repeat("=", 60) . "\n";
+        $content .= "Total Posts Processed: " . count($this->log_data['posts']) . "\n";
+        $content .= "Indexed: {$indexed_count}\n";
+        $content .= "Skipped: {$skipped_count}\n";
+        $content .= "Total Chunks: {$total_chunks}\n";
+
+        file_put_contents($this->log_file, $content);
+    }
+
+    /**
+     * Log a post to the index log
+     */
+    private function logPost(array $data): void
+    {
+        $this->log_data['posts'][] = $data;
     }
 
     /**
@@ -387,6 +460,15 @@ class CLI
 
             if ($text_length < 100) {
                 \WP_CLI::log("      ⏭ Skipped (content too short: {$text_length} chars)");
+                $this->logPost([
+                    'id' => $post->ID,
+                    'title' => $title,
+                    'url' => $url,
+                    'type' => $post_type,
+                    'language' => $language,
+                    'status' => 'skipped',
+                    'reason' => "Content too short ({$text_length} chars)",
+                ]);
                 continue;
             }
 
@@ -460,9 +542,23 @@ class CLI
             if ($post_cached > 0) $embed_info[] = "cached: {$post_cached}";
             if ($post_new > 0) $embed_info[] = "new: {$post_new}";
             if ($post_failed > 0) $embed_info[] = "failed: {$post_failed}";
+            $embed_str = implode(', ', $embed_info);
             if (!empty($embed_info)) {
-                \WP_CLI::log("      🔢 Embeddings: " . implode(', ', $embed_info));
+                \WP_CLI::log("      🔢 Embeddings: {$embed_str}");
             }
+
+            // Log this post
+            $this->logPost([
+                'id' => $post->ID,
+                'title' => $title,
+                'url' => $url,
+                'type' => $post_type,
+                'language' => $language,
+                'status' => 'indexed',
+                'content_length' => $text_length,
+                'chunks' => $chunk_count,
+                'embeddings' => $embed_str ?: 'none',
+            ]);
         }
 
         if (!empty($points)) {
